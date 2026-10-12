@@ -24,7 +24,9 @@ iCloud 写真データをバックアップするやつ
             "Effect": "Allow",
             "Action": [
                 "s3:PutObject",
-                "s3:GetObject"
+                "s3:GetObject",
+                "s3:AbortMultipartUpload",
+                "s3:ListMultipartUploadParts"
             ],
             "Resource": "arn:aws:s3:::{S3_BUCKET}/{S3_PREFIX}*"
         }

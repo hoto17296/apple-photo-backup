@@ -1,10 +1,11 @@
 {
   "name": "apple-photo-backup",
-  "module": "index.ts",
-  "type": "module",
   "private": true,
+  "type": "module",
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "oxfmt": "^0.72.0",
+    "oxlint": "^1.87.0"
   },
   "peerDependencies": {
     "typescript": "^7"
