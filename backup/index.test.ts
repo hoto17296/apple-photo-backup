@@ -41,6 +41,8 @@ function setup(
   const s3 = startFakeS3({ maxKeys: options.s3MaxKeys });
   cleanups.push(photokit.stop, s3.stop);
   const logs: string[] = [];
+  // 再試行の前の待ち時間（実際には待たない）
+  const sleeps: number[] = [];
   const run = (opts: Parameters<typeof backup>[1] = {}) =>
     backup(
       {
@@ -50,10 +52,13 @@ function setup(
         storageClass: options.storageClass,
         log: (line) => logs.push(line),
         now: () => NOW,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
       },
       opts,
     );
-  return { photokit, s3, logs, run };
+  return { photokit, s3, logs, sleeps, run };
 }
 
 describe("backup", () => {
@@ -404,6 +409,71 @@ describe("追加からの経過日数", () => {
   });
 });
 
+describe("再試行", () => {
+  const flaky = (failTimes: number) =>
+    makeAsset({}, [{ ...photo(0, "IMG_0004.HEIC", "flaky"), failTimes }]);
+
+  test("デフォルトでは、失敗したアセットを 3 秒待ってから 1 回だけ再試行する", async () => {
+    const asset = flaky(1);
+    const { s3, logs, sleeps, run } = setup([asset]);
+
+    const summary = await run();
+
+    expect(summary).toEqual({ total: 1, uploaded: 1, skipped: 0, failed: 0, stopped: false });
+    expect(sleeps).toEqual([3000]);
+    expect(s3.text(`assets/${cloudUuid(asset)}/resources/IMG_0004.HEIC`)).toBe("flaky");
+    expect(logs[0]).toStartWith("[1/1]");
+    expect(logs[0]).toContain("Temporarily could not read IMG_0004.HEIC");
+    expect(logs[0]).toContain("retrying in 3s (1/1)");
+    expect(logs[1]).toContain("uploaded");
+  });
+
+  test("再試行しても失敗したら、そのアセットは失敗にする", async () => {
+    const asset = flaky(2);
+    const { s3, logs, sleeps, run } = setup([asset]);
+
+    const summary = await run();
+
+    expect(summary).toEqual({ total: 1, uploaded: 0, skipped: 0, failed: 1, stopped: true });
+    expect(sleeps).toEqual([3000]);
+    expect(s3.objects.has(`assets/${cloudUuid(asset)}/backup.log`)).toBe(false);
+    expect(logs[1]).toContain("failed: ");
+    expect(logs[1]).not.toContain("retrying");
+  });
+
+  test("retries で再試行の回数を変えられる", async () => {
+    const asset = flaky(2);
+    const { logs, sleeps, run } = setup([asset]);
+
+    const summary = await run({ retries: 2 });
+
+    expect(summary.uploaded).toBe(1);
+    expect(sleeps).toEqual([3000, 3000]);
+    expect(logs[1]).toContain("retrying in 3s (2/2)");
+  });
+
+  test("retries が 0 なら再試行しない", async () => {
+    const asset = flaky(1);
+    const { sleeps, run } = setup([asset]);
+
+    const summary = await run({ retries: 0 });
+
+    expect(summary.failed).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  test("何度やっても同じ結果になるエラー（cloud_identifier の書式など）は再試行しない", async () => {
+    const malformed = makeAsset({ cloud_identifier: "not-a-cloud-identifier" });
+    const badFilename = makeAsset({}, [photo(0, "../escape.HEIC", "x")]);
+    const { sleeps, run } = setup([malformed, badFilename]);
+
+    const summary = await run({ continueOnError: true });
+
+    expect(summary.failed).toBe(2);
+    expect(sleeps).toEqual([]);
+  });
+});
+
 describe("エラー", () => {
   function failingAssets() {
     const failing = makeAsset({}, [{ ...photo(0, "IMG_0002.HEIC", "x"), status: 500 }]);
@@ -505,6 +575,7 @@ describe("parseCliArgs", () => {
       continueOnError: false,
       force: false,
       minAgeDays: 90,
+      retries: 1,
       help: false,
     });
   });
@@ -518,14 +589,23 @@ describe("parseCliArgs", () => {
         "--force",
         "--min-age-days",
         "30",
+        "--retries",
+        "3",
       ]),
     ).toEqual({
       id: "ABC/L0/001",
       continueOnError: true,
       force: true,
       minAgeDays: 30,
+      retries: 3,
       help: false,
     });
+  });
+
+  test("--retries は 0 以上の整数", () => {
+    expect(parseCliArgs(["--retries", "0"]).retries).toBe(0);
+    expect(() => parseCliArgs(["--retries", "-1"])).toThrow("--retries");
+    expect(() => parseCliArgs(["--retries", "x"])).toThrow("--retries");
   });
 
   test("--min-age-days は 0 以上の整数", () => {

@@ -22,6 +22,7 @@ bun ./backup --id 'D488F985-503B-46A5-AC88-24C25C0DF33D/L0/001'
 | `--continue-on-error` | エラーが起きたアセットだけを中止して、次のアセットに進む（デフォルトはその場で停止する）                  |
 | `--force`             | バックアップ済み（`backup.log` がある）アセットもバックアップし直す                                       |
 | `--min-age-days <N>`  | ライブラリに追加されてから N 日以上たったアセットだけをバックアップする（デフォルト: 90。`0` で制限なし） |
+| `--retries <N>`       | 失敗したアセットを 3 秒待ってから再試行する回数（デフォルト: 1。`0` で再試行しない）                      |
 | `-h`, `--help`        | ヘルプを表示する                                                                                          |
 
 ### 環境変数
@@ -41,8 +42,11 @@ bun ./backup --id 'D488F985-503B-46A5-AC88-24C25C0DF33D/L0/001'
 ```
 [    1/12909] F9B6AB7F-CC73-4223-955A-C0E50FB8A3CF IMG_2235.HEIC: uploaded 7 files (2.2 MB)
 [    2/12909] B1CDF4C4-8088-4DEF-9565-62962EA562E9 IMG_0431.JPG: skipped (already backed up)
-[    3/12909] 2475184C-5369-4290-976F-A6079A1A3866 IMG_0013.jpg: failed: GET /assets/... failed with 500: ...
-Done: 1 uploaded, 1 skipped, 1 failed (stopped on error)
+[    3/12909] 2475184C-5369-4290-976F-A6079A1A3866 IMG_0013.jpg: failed: an unexpected error has occurred, retrying in 3s (1/1)
+[    3/12909] 2475184C-5369-4290-976F-A6079A1A3866 IMG_0013.jpg: uploaded 5 files (2.1 MB)
+[    4/12909] 843723D0-4A82-4A18-B09D-8365437A59F8 IMG_0442.JPG: failed: GET /assets/... failed with 500: ..., retrying in 3s (1/1)
+[    4/12909] 843723D0-4A82-4A18-B09D-8365437A59F8 IMG_0442.JPG: failed: GET /assets/... failed with 500: ...
+Done: 2 uploaded, 1 skipped, 1 failed (stopped on error)
 ```
 
 終了コードは、すべて成功（またはスキップ）なら `0`、失敗したアセットがあれば `1`、オプションが不正なら `2`。
@@ -96,6 +100,10 @@ Done: 1 uploaded, 1 skipped, 1 failed (stopped on error)
    3. `resources/*` → `thumbnail.jpeg` → `metadata.json` → `resources.json` の順に保存し、最後に `backup.log` を書く
 
 - `backup.log` がないアセットは、途中まで保存されたファイルがあっても全ファイルを最初から保存し直す
+- アセットの処理に失敗したら、3 秒待ってからそのアセットの処理を最初からやり直す（`--retries` 回まで。デフォルトは 1 回）
+  - ネットワークの瞬間的な不調による失敗（1,000 件に 1 件程度）を減らすため。`backup.log` は最後に書くので、やり直しても問題ない
+  - `cloud_identifier` の書式や `filename` が不正な場合など、やり直しても同じ結果になるエラーは再試行しない
+  - 再試行しても失敗した場合は、`--continue-on-error` の有無に従って停止するか次のアセットに進む
 - すべてのオブジェクト（`backup.log` を含む）を `S3_STORAGE_CLASS` のストレージクラスで保存する。Intelligent-Tiering では 128KB 未満のオブジェクトは監視されず常に高頻度アクセス層（Standard と同じ単価）になるため、小さい JSON や `backup.log` を同じクラスにしても不利にならない
 - リソースとサムネイルは、PhotoKit Server からのレスポンスをストリームのまま S3 に書き込む。大きいファイルは自動でマルチパートアップロードになり、ダウンロードが途中で失敗した場合はマルチパートアップロードを中止する
 - `filename` にパス区切り（`/`, `\`）が含まれるリソースがある場合、そのアセットはエラーにする

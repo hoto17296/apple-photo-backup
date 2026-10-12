@@ -13,6 +13,7 @@ Options:
   --continue-on-error   エラーが起きたアセットを中止して次のアセットに進む（デフォルトは停止）
   --force               バックアップ済み（backup.log がある）アセットもバックアップし直す
   --min-age-days <N>    ライブラリに追加されてから N 日以上たったアセットだけをバックアップする（デフォルト: 90）
+  --retries <N>         失敗したアセットを 3 秒待ってから再試行する回数（デフォルト: 1）
   -h, --help            このヘルプを表示する
 
 Environment:
@@ -29,6 +30,14 @@ const CLOUD_UUID = /^([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{1
 
 // 追加されたばかりのアセットは、削除や編集をする可能性があるので、この日数がたつまでバックアップしない
 const DEFAULT_MIN_AGE_DAYS = 90;
+
+// ネットワークの瞬間的な不調で失敗することがあるので、少し待ってからアセット単位で再試行する。
+// backup.log は最後に書くので、アセットの処理を最初からやり直しても問題ない
+const DEFAULT_RETRIES = 1;
+const RETRY_DELAY_MS = 3000;
+
+// 再試行しても同じ結果になるエラー（データの不備など）。再試行しない
+class PermanentError extends Error {}
 
 export type Asset = {
   id: string;
@@ -89,6 +98,7 @@ export type CliOptions = {
   continueOnError: boolean;
   force: boolean;
   minAgeDays: number;
+  retries: number;
   help: boolean;
 };
 
@@ -100,20 +110,24 @@ export function parseCliArgs(argv: string[]): CliOptions {
       "continue-on-error": { type: "boolean", default: false },
       force: { type: "boolean", default: false },
       "min-age-days": { type: "string", default: String(DEFAULT_MIN_AGE_DAYS) },
+      retries: { type: "string", default: String(DEFAULT_RETRIES) },
       help: { type: "boolean", short: "h", default: false },
     },
     strict: true,
   });
-  if (!/^\d+$/.test(values["min-age-days"])) {
-    throw new Error(`--min-age-days must be a non-negative integer: ${values["min-age-days"]}`);
-  }
   return {
     id: values.id,
     continueOnError: values["continue-on-error"],
     force: values.force,
-    minAgeDays: Number(values["min-age-days"]),
+    minAgeDays: nonNegativeInteger("--min-age-days", values["min-age-days"]),
+    retries: nonNegativeInteger("--retries", values.retries),
     help: values.help,
   };
+}
+
+function nonNegativeInteger(name: string, value: string): number {
+  if (!/^\d+$/.test(value)) throw new Error(`${name} must be a non-negative integer: ${value}`);
+  return Number(value);
 }
 
 export class PhotoKitClient {
@@ -178,6 +192,7 @@ export type BackupDeps = {
   storageClass?: StorageClass;
   log?: (line: string) => void;
   now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
 };
 
 export type BackupOptions = {
@@ -186,6 +201,8 @@ export type BackupOptions = {
   force?: boolean;
   // ライブラリに追加されてからこの日数以上たったアセットだけをバックアップする（デフォルト: 90）
   minAgeDays?: number;
+  // 失敗したアセットを再試行する回数（デフォルト: 1）
+  retries?: number;
 };
 
 export type Summary = {
@@ -225,12 +242,24 @@ export async function backup(deps: BackupDeps, options: BackupOptions): Promise<
     stopped: false,
   };
   const width = String(assets.length).length;
+  const retries = options.retries ?? DEFAULT_RETRIES;
+  const sleep = deps.sleep ?? ((ms: number) => Bun.sleep(ms));
 
   for (const [i, asset] of assets.entries()) {
     const progress = `[${String(i + 1).padStart(width)}/${assets.length}]`;
     const label = `${cloudUuid(asset) ?? asset.id} ${asset.original_filename ?? ""}`.trimEnd();
     try {
-      const result = await backupAsset(deps, asset, options.force ?? false, backedUp);
+      const result = await withRetries(
+        retries,
+        () => backupAsset(deps, asset, options.force ?? false, backedUp),
+        async (error, attempt) => {
+          log(
+            `${progress} ${label}: failed: ${errorMessage(error)}, ` +
+              `retrying in ${RETRY_DELAY_MS / 1000}s (${attempt}/${retries})`,
+          );
+          await sleep(RETRY_DELAY_MS);
+        },
+      );
       if (result.skipped) {
         summary.skipped++;
         log(`${progress} ${label}: skipped (already backed up)`);
@@ -240,9 +269,7 @@ export async function backup(deps: BackupDeps, options: BackupOptions): Promise<
       }
     } catch (error) {
       summary.failed++;
-      log(
-        `${progress} ${label}: failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      log(`${progress} ${label}: failed: ${errorMessage(error)}`);
       if (!options.continueOnError) {
         summary.stopped = true;
         break;
@@ -255,6 +282,26 @@ export async function backup(deps: BackupDeps, options: BackupOptions): Promise<
       (summary.stopped ? " (stopped on error)" : ""),
   );
   return summary;
+}
+
+// fn が失敗したら、retries 回まで beforeRetry を呼んでからやり直す。PermanentError はやり直さない
+async function withRetries<T>(
+  retries: number,
+  fn: () => Promise<T>,
+  beforeRetry: (error: unknown, attempt: number) => Promise<void>,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt > retries || error instanceof PermanentError) throw error;
+      await beforeRetry(error, attempt);
+    }
+  }
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 // backup.log がある（バックアップが完了している）アセットの UUID を集める
@@ -276,8 +323,11 @@ async function listBackedUp(deps: BackupDeps): Promise<Set<string>> {
 // backedUp がなければ、backup.log があるかを HEAD で確かめる
 async function backupAsset(deps: BackupDeps, asset: Asset, force: boolean, backedUp?: Set<string>) {
   const uuid = cloudUuid(asset);
-  if (!uuid)
-    throw new Error(`Invalid cloud_identifier: ${JSON.stringify(asset.cloud_identifier ?? null)}`);
+  if (!uuid) {
+    throw new PermanentError(
+      `Invalid cloud_identifier: ${JSON.stringify(asset.cloud_identifier ?? null)}`,
+    );
+  }
   const base = `${deps.prefix}assets/${uuid}/`;
 
   const logFile = deps.s3.file(`${base}backup.log`);
@@ -287,8 +337,9 @@ async function backupAsset(deps: BackupDeps, asset: Asset, force: boolean, backe
 
   const resources = await deps.photokit.resources(asset.id);
   for (const resource of resources) {
-    if (!isSafeFilename(resource.filename))
-      throw new Error(`Invalid resource filename: ${JSON.stringify(resource.filename)}`);
+    if (!isSafeFilename(resource.filename)) {
+      throw new PermanentError(`Invalid resource filename: ${JSON.stringify(resource.filename)}`);
+    }
   }
 
   // Response を渡すと、ボディをストリームのまま S3 に書き込む。大きいファイルはマルチパートアップロードになり、

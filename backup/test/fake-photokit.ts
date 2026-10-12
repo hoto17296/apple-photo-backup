@@ -13,6 +13,8 @@ export type FakeResource = {
   body?: Uint8Array;
   stream?: () => ReadableStream<Uint8Array>;
   status?: number;
+  // 最初の failTimes 回だけ 500 を返す（一時的なエラーの再現用）
+  failTimes?: number;
 };
 
 export type FakeAsset = {
@@ -70,6 +72,10 @@ export function startFakePhotoKit(
         if (!resource) return error(404, "not_found", "The resource was not found");
         if (resource.status)
           return error(resource.status, "failed", `Could not read ${resource.meta.filename}`);
+        if (resource.failTimes) {
+          resource.failTimes--;
+          return error(500, "failed", `Temporarily could not read ${resource.meta.filename}`);
+        }
         return new Response(resource.stream ? resource.stream() : resource.body, {
           headers: { "Content-Type": resource.meta.mime_type ?? "application/octet-stream" },
         });
