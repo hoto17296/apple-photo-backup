@@ -1,7 +1,12 @@
 // テスト用の S3 互換サーバ（Bun の S3Client が使う範囲だけを実装したもの）
 import { S3Client } from "bun";
 
-export type StoredObject = { body: Uint8Array; type: string | null; storageClass: string | null };
+export type StoredObject = {
+  body: Uint8Array;
+  type: string | null;
+  storageClass: string | null;
+  lastModified: Date;
+};
 export type RecordedRequest = { method: string; key: string; query: string[] };
 
 // maxKeys: ListObjectsV2 の 1 ページあたりの件数の上限（ページ送りのテスト用）
@@ -41,7 +46,8 @@ export function startFakeS3(options: { maxKeys?: number } = {}) {
         const contents = page
           .map(
             (k) =>
-              `<Contents><Key>${escapeXml(k)}</Key><Size>${objects.get(k)!.body.length}</Size></Contents>`,
+              `<Contents><Key>${escapeXml(k)}</Key><LastModified>${objects.get(k)!.lastModified.toISOString()}</LastModified>` +
+              `<Size>${objects.get(k)!.body.length}</Size></Contents>`,
           )
           .join("");
         return xml(
@@ -82,6 +88,7 @@ export function startFakeS3(options: { maxKeys?: number } = {}) {
           body: concat(parts),
           type: upload.type,
           storageClass: upload.storageClass,
+          lastModified: new Date(),
         });
         uploads.delete(uploadId);
         return xml(
@@ -97,6 +104,7 @@ export function startFakeS3(options: { maxKeys?: number } = {}) {
           body: new Uint8Array(await req.arrayBuffer()),
           type: req.headers.get("content-type"),
           storageClass: req.headers.get("x-amz-storage-class"),
+          lastModified: new Date(),
         });
         return new Response(null, { headers: { ETag: '"object"' } });
       }

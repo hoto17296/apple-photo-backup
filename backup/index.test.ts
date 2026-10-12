@@ -343,6 +343,67 @@ describe("backup", () => {
   });
 });
 
+describe("追加からの経過日数", () => {
+  // NOW の n 日前（API と同じ秒単位の書式）
+  const daysAgo = (n: number) =>
+    new Date(NOW.getTime() - n * 86400_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+  test("デフォルトでは、追加から 90 日以上たったアセットだけをバックアップする", async () => {
+    const [old, boundary, recent] = [
+      makeAsset({ added_at: daysAgo(100) }),
+      makeAsset({ added_at: daysAgo(90) }),
+      makeAsset({ added_at: daysAgo(89) }),
+    ];
+    const { s3, logs, run } = setup([old, boundary, recent]);
+
+    const summary = await run();
+
+    expect(summary).toEqual({ total: 2, uploaded: 2, skipped: 0, failed: 0, stopped: false });
+    expect(s3.objects.has(`assets/${cloudUuid(old)}/backup.log`)).toBe(true);
+    expect(s3.objects.has(`assets/${cloudUuid(boundary)}/backup.log`)).toBe(true);
+    expect(s3.objects.has(`assets/${cloudUuid(recent)}/backup.log`)).toBe(false);
+    expect(logs[0]).toContain("1 assets added after 2026-07-14T01:02:03Z are excluded");
+  });
+
+  test("minAgeDays で日数を変えられる", async () => {
+    const [old, recent] = [
+      makeAsset({ added_at: daysAgo(31) }),
+      makeAsset({ added_at: daysAgo(29) }),
+    ];
+    const { s3, run } = setup([old, recent]);
+
+    const summary = await run({ minAgeDays: 30 });
+
+    expect(summary.uploaded).toBe(1);
+    expect(s3.objects.has(`assets/${cloudUuid(old)}/backup.log`)).toBe(true);
+  });
+
+  test("minAgeDays が 0 なら、追加されたばかりのアセットもバックアップする", async () => {
+    const asset = makeAsset({ added_at: daysAgo(0) });
+    const { run } = setup([asset]);
+
+    expect((await run({ minAgeDays: 0 })).uploaded).toBe(1);
+  });
+
+  test("ID を指定したときも、追加から日が浅ければバックアップしない", async () => {
+    const asset = makeAsset({ added_at: daysAgo(10) });
+    const { s3, logs, run } = setup([asset]);
+
+    const summary = await run({ id: asset.metadata.id });
+
+    expect(summary).toEqual({ total: 0, uploaded: 0, skipped: 0, failed: 0, stopped: false });
+    expect(s3.objects.size).toBe(0);
+    expect(logs[0]).toContain("excluded");
+  });
+
+  test("added_at がないアセットは、経過日数が分からないのでバックアップする", async () => {
+    const asset = makeAsset({ added_at: undefined });
+    const { run } = setup([asset]);
+
+    expect((await run()).uploaded).toBe(1);
+  });
+});
+
 describe("エラー", () => {
   function failingAssets() {
     const failing = makeAsset({}, [{ ...photo(0, "IMG_0002.HEIC", "x"), status: 500 }]);
@@ -443,17 +504,35 @@ describe("parseCliArgs", () => {
       id: undefined,
       continueOnError: false,
       force: false,
+      minAgeDays: 90,
       help: false,
     });
   });
 
   test("すべてのオプション", () => {
-    expect(parseCliArgs(["--id", "ABC/L0/001", "--continue-on-error", "--force"])).toEqual({
+    expect(
+      parseCliArgs([
+        "--id",
+        "ABC/L0/001",
+        "--continue-on-error",
+        "--force",
+        "--min-age-days",
+        "30",
+      ]),
+    ).toEqual({
       id: "ABC/L0/001",
       continueOnError: true,
       force: true,
+      minAgeDays: 30,
       help: false,
     });
+  });
+
+  test("--min-age-days は 0 以上の整数", () => {
+    expect(parseCliArgs(["--min-age-days", "0"]).minAgeDays).toBe(0);
+    expect(() => parseCliArgs(["--min-age-days", "-1"])).toThrow("--min-age-days");
+    expect(() => parseCliArgs(["--min-age-days", "1.5"])).toThrow("--min-age-days");
+    expect(() => parseCliArgs(["--min-age-days", "abc"])).toThrow("--min-age-days");
   });
 
   test("未知のオプションはエラー", () => {

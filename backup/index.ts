@@ -1,16 +1,18 @@
-import { parseArgs } from "node:util";
-
 // macOS PhotoKit Server から写真ライブラリを読み取り、S3 にバックアップする
 //
-// 使い方: bun backup-to-s3-cli/backup.ts [--id <アセット ID>] [--continue-on-error] [--force]
+// 使い方: bun ./backup [--id <アセット ID>] [--continue-on-error] [--force] [--min-age-days <N>]
+
+import { parseArgs } from "node:util";
+
 import { S3Client, type S3File, type S3Options } from "bun";
 
-const USAGE = `Usage: bun backup.ts [options]
+const USAGE = `Usage: bun ./backup [options]
 
 Options:
   --id <id>             指定したアセット（localIdentifier）だけをバックアップする
   --continue-on-error   エラーが起きたアセットを中止して次のアセットに進む（デフォルトは停止）
   --force               バックアップ済み（backup.log がある）アセットもバックアップし直す
+  --min-age-days <N>    ライブラリに追加されてから N 日以上たったアセットだけをバックアップする（デフォルト: 90）
   -h, --help            このヘルプを表示する
 
 Environment:
@@ -25,7 +27,15 @@ Environment:
 // CloudIdentifier の先頭の UUID 部分。S3 のキーに使う
 const CLOUD_UUID = /^([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}):/;
 
-export type Asset = { id: string; cloud_identifier?: string; original_filename?: string };
+// 追加されたばかりのアセットは、削除や編集をする可能性があるので、この日数がたつまでバックアップしない
+const DEFAULT_MIN_AGE_DAYS = 90;
+
+export type Asset = {
+  id: string;
+  cloud_identifier?: string;
+  original_filename?: string;
+  added_at?: string;
+};
 export type Resource = { index: number; filename: string; mime_type?: string };
 
 export type StorageClass = NonNullable<S3Options["storageClass"]>;
@@ -78,6 +88,7 @@ export type CliOptions = {
   id: string | undefined;
   continueOnError: boolean;
   force: boolean;
+  minAgeDays: number;
   help: boolean;
 };
 
@@ -88,14 +99,19 @@ export function parseCliArgs(argv: string[]): CliOptions {
       id: { type: "string" },
       "continue-on-error": { type: "boolean", default: false },
       force: { type: "boolean", default: false },
+      "min-age-days": { type: "string", default: String(DEFAULT_MIN_AGE_DAYS) },
       help: { type: "boolean", short: "h", default: false },
     },
     strict: true,
   });
+  if (!/^\d+$/.test(values["min-age-days"])) {
+    throw new Error(`--min-age-days must be a non-negative integer: ${values["min-age-days"]}`);
+  }
   return {
     id: values.id,
     continueOnError: values["continue-on-error"],
     force: values.force,
+    minAgeDays: Number(values["min-age-days"]),
     help: values.help,
   };
 }
@@ -164,7 +180,13 @@ export type BackupDeps = {
   now?: () => Date;
 };
 
-export type BackupOptions = { id?: string; continueOnError?: boolean; force?: boolean };
+export type BackupOptions = {
+  id?: string;
+  continueOnError?: boolean;
+  force?: boolean;
+  // ライブラリに追加されてからこの日数以上たったアセットだけをバックアップする（デフォルト: 90）
+  minAgeDays?: number;
+};
 
 export type Summary = {
   total: number;
@@ -178,9 +200,21 @@ export async function backup(deps: BackupDeps, options: BackupOptions): Promise<
   const log = deps.log ?? console.log;
 
   // 全体の件数を出すため、先に一覧をすべて取得する
-  const assets = options.id
+  const listed = options.id
     ? [await deps.photokit.asset(options.id)]
     : await Array.fromAsync(deps.photokit.listAssets());
+
+  // 追加から日が浅いアセットを除く。added_at がないアセットは経過日数が分からないのでバックアップする
+  const minAgeDays = options.minAgeDays ?? DEFAULT_MIN_AGE_DAYS;
+  const cutoff = new Date((deps.now ?? (() => new Date()))().getTime() - minAgeDays * 86400_000);
+  const assets = listed.filter((a) => !a.added_at || new Date(a.added_at) <= cutoff);
+  if (assets.length < listed.length) {
+    const since = cutoff.toISOString().replace(/\.\d{3}Z$/, "Z");
+    log(
+      `${listed.length - assets.length} assets added after ${since} are excluded (--min-age-days ${minAgeDays})`,
+    );
+  }
+
   // 全件の実行では、アセットごとに HEAD する代わりに、一覧取得でバックアップ済みのアセットをまとめて調べる
   const backedUp = options.id ? undefined : await listBackedUp(deps);
   const summary: Summary = {
