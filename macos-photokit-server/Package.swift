@@ -1,6 +1,11 @@
 // swift-tools-version: 6.2
 
+import Foundation
 import PackageDescription
+
+// Absolute path, so the linker finds it regardless of the directory it runs in.
+let infoPlistPath = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    .appendingPathComponent("Support/Info.plist").path
 
 let package = Package(
     name: "photokit-server",
@@ -39,7 +44,7 @@ let package = Package(
                     "-Xlinker", "-sectcreate",
                     "-Xlinker", "__TEXT",
                     "-Xlinker", "__info_plist",
-                    "-Xlinker", "Support/Info.plist",
+                    "-Xlinker", infoPlistPath,
                 ])
             ]
         ),
