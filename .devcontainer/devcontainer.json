@@ -1,0 +1,13 @@
+{
+  "name": "apple-photo-backup",
+  "dockerComposeFile": ["compose.yaml", "compose.env.yaml"],
+  "service": "workspace",
+  "workspaceFolder": "/workspace",
+  "forwardPorts": [5173],
+  "postCreateCommand": "bun install",
+  "customizations": {
+    "vscode": {
+      "extensions": ["oxc.oxc-vscode"]
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "[html][css][javascript][javascriptreact][typescript][typescriptreact][json][jsonc]": {
+    "editor.defaultFormatter": "oxc.oxc-vscode",
+    "editor.formatOnSave": true
+  },
+  "oxc.path.node": "/usr/local/bun-node-fallback-bin/node",
+  "remote.autoForwardPorts": false
+}

@@ -1,0 +1,11 @@
+services:
+  workspace:
+    build: .
+    command: sleep infinity
+    volumes:
+      - ..:/workspace
+    environment:
+      DATABASE_URL: "file:./dev.db"
+      TEST_DATABASE_URL: "file:./test.db"
+      SESSION_SECRET: "local-dev-only-secret-change-me"
+      DEV_LOGIN_BYPASS: "true"
