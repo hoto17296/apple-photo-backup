@@ -255,18 +255,20 @@ struct Media: Sendable {
                 logger.notice("Could not render \(asset.localIdentifier) (\(error.message)); using the original file")
                 data = try await resourceData(resource, networkAccessAllowed: networkAccessAllowed)
             }
-            guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
-                throw APIError.internalError("Failed to decode the image")
+            if let image = Self.thumbnail(of: data, typeHint: nil, size: size) {
+                return image
             }
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: size,
-            ]
-            guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-                throw APIError.internalError("Failed to scale the image")
+            // ImageIO guesses the type from the content, and some RAW files (e.g. Sony ARW from the α7C II)
+            // are guessed as plain TIFF, which it cannot decode. PhotoKit reports the same wrong type for the
+            // image data, but the original resource keeps the right one (from the file name), so retry with it.
+            let originalType = PhotoLibrary.originalResource(of: asset)?.uniformTypeIdentifier
+            if let originalType, let image = Self.thumbnail(of: data, typeHint: originalType, size: size) {
+                logger.notice("Decoded \(asset.localIdentifier) as \(originalType) instead of the type guessed from its content")
+                return image
             }
-            return image
+            throw APIError.internalError(
+                "Failed to scale the image (original type: \(originalType ?? "none"), \(data.count) bytes)"
+            )
         case .video:
             let video = try await videoAsset(asset, networkAccessAllowed: networkAccessAllowed)
             let generator = AVAssetImageGenerator(asset: video.value)
@@ -280,6 +282,17 @@ struct Media: Sendable {
         default:
             throw APIError.notFound("The asset has no image")
         }
+    }
+
+    private static func thumbnail(of data: Data, typeHint: String?, size: Int) -> CGImage? {
+        let sourceOptions = typeHint.map { [kCGImageSourceTypeIdentifierHint: $0] as CFDictionary }
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: size,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 
     private func videoAsset(_ asset: PHAsset, networkAccessAllowed: Bool) async throws -> UncheckedSendable<AVAsset> {
